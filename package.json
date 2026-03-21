@@ -1,0 +1,49 @@
+{
+  "name": "agent-memory-kit",
+  "version": "0.1.0",
+  "description": "Structured memory and relay auto-compaction toolkit for AI agents",
+  "license": "MIT",
+  "author": "Open Source Contributors",
+  "keywords": [
+    "ai",
+    "agent",
+    "memory",
+    "structured-memory",
+    "compaction",
+    "ai-sdk",
+    "typescript"
+  ],
+  "main": "./dist/index.js",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE",
+    "docs"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "clean": "rm -rf dist",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "dependencies": {
+    "ai": "^6.0.91"
+  },
+  "devDependencies": {
+    "@types/node": "^24.1.0",
+    "typescript": "^5.8.2",
+    "vitest": "^2.0.0"
+  }
+}
