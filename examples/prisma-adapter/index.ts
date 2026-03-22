@@ -9,13 +9,19 @@ function createDelegate(rows: Row[] = []) {
   return {
     async findMany(args: any) {
       const where = args?.where ?? {};
-      return rows.filter((row) =>
-        Object.entries(where).every(([key, value]) => row[key] === value),
-      );
+      let results = rows.filter((row) => matchesWhere(row, where));
+      results = applyOrderBy(results, args?.orderBy);
+      if (typeof args?.take === "number") {
+        results = results.slice(0, args.take);
+      }
+      return results;
     },
     async findFirst(args: any) {
-      const results = await this.findMany(args);
+      const results = await this.findMany({ ...args, take: 1 });
       return results[0] ?? null;
+    },
+    async findUnique(args: any) {
+      return rows.find((row) => row.id === args?.where?.id) ?? null;
     },
     async create(args: any) {
       rows.push(args.data);
@@ -42,7 +48,36 @@ function createDelegate(rows: Row[] = []) {
       rows.push(args.create);
       return args.create;
     },
+    async count(args: any) {
+      return rows.filter((row) => matchesWhere(row, args?.where ?? {})).length;
+    },
   };
+}
+
+function matchesWhere(row: Row, where: Record<string, any>): boolean {
+  return Object.entries(where).every(([key, value]) => {
+    const actual = row[key];
+    if (value && typeof value === "object" && !Array.isArray(value)) {
+      if ("in" in value) return value.in.includes(actual);
+      if ("gt" in value) return actual > value.gt;
+      if ("lte" in value) return actual <= value.lte;
+    }
+    return actual === value;
+  });
+}
+
+function applyOrderBy(rows: Row[], orderBy: any): Row[] {
+  if (!orderBy) return rows;
+  const clauses = Array.isArray(orderBy) ? orderBy : [orderBy];
+  return [...rows].sort((left, right) => {
+    for (const clause of clauses) {
+      const [key, direction] = Object.entries(clause)[0] as [string, "asc" | "desc"];
+      const multiplier = direction === "desc" ? -1 : 1;
+      if (left[key] < right[key]) return -1 * multiplier;
+      if (left[key] > right[key]) return 1 * multiplier;
+    }
+    return 0;
+  });
 }
 
 function textMessage(id: string, text: string) {
@@ -86,7 +121,7 @@ export async function runPrismaAdapterExample() {
     ] as any,
   });
 
-  const items = await store.listMemoryItems(scope);
+  const items = await store.listActiveMemoryItems(scope);
 
   return {
     admitted: result.admitted,

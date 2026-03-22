@@ -2,11 +2,11 @@ import type { ClassifierResult, MemoryPreset } from "../types";
 import { clamp01, normalizeText } from "../utils/text";
 
 const genericSlotPolicies = {
-  "general.fact": { cardinality: "multi" as const, ttlDays: 120 },
-  "general.decision": { cardinality: "multi" as const, ttlDays: 365 },
-  "general.constraint": { cardinality: "multi" as const, ttlDays: null, isPinned: true },
-  "general.preference": { cardinality: "multi" as const, ttlDays: 180 },
-  "general.question": { cardinality: "multi" as const, ttlDays: 45 },
+  "general.fact": { cardinality: "multi" as const, ttlDays: 120, aliases: ["fact", "known", "known fact"] },
+  "general.decision": { cardinality: "multi" as const, ttlDays: 365, aliases: ["decision", "plan", "chosen approach"] },
+  "general.constraint": { cardinality: "multi" as const, ttlDays: null, isPinned: true, aliases: ["constraint", "requirement", "must", "non-negotiable"] },
+  "general.preference": { cardinality: "multi" as const, ttlDays: 180, aliases: ["preference", "prefer", "preferred"] },
+  "general.question": { cardinality: "multi" as const, ttlDays: 45, aliases: ["question", "open question", "unknown"] },
 };
 
 function classify(sentence: string): ClassifierResult | null {

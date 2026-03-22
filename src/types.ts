@@ -2,16 +2,12 @@ import type { UIMessage } from "ai";
 
 export type MemoryType = "FACT" | "CONSTRAINT" | "DECISION" | "PREFERENCE" | "QUESTION";
 export type MemorySource = "user_confirmed" | "tool_verified" | "assistant_inferred" | "system";
-export type MemoryStatus = "ACTIVE" | "SUPERSEDED" | "EXPIRED" | "DROPPED";
+export type MemoryStatus = "ACTIVE" | "SUPERSEDED" | "EXPIRED" | "DROPPED" | "CONFLICTED";
 export type MemoryIntent = "FACT" | "DECISION" | "QUESTION" | "TASK" | "NOTE";
 export type SlotCardinality = "single" | "multi";
 export type ConflictStatus = "OPEN" | "RESOLVED";
-export type ConflictResolution =
-  | "existing"
-  | "candidate"
-  | "needs_user"
-  | "merged"
-  | "superseded";
+export type ConflictResolution = "existing" | "candidate" | "needs_user" | "merged";
+export type ConflictWinner = "existing" | "candidate" | "merged";
 
 export interface ScopeRef {
   tenantId: string;
@@ -50,7 +46,6 @@ export interface MemoryCandidate extends ScopeRef {
   weight: number;
   isPinned: boolean;
   ttlDays: number | null;
-  hasOpenConflict: boolean;
   overrideSignal: boolean;
   intent: MemoryIntent;
   canonicalValue?: string | null;
@@ -97,12 +92,12 @@ export interface Episode extends ScopeRef {
 export interface Conflict extends ScopeRef {
   id: string;
   slotKey: string;
-  existingMemoryId?: string | null;
-  newMemoryId?: string | null;
-  winningMemoryId?: string | null;
+  existingMemoryId: string;
+  newMemoryId: string;
+  winningMemoryId: string | null;
   reason: string;
   status: ConflictStatus;
-  resolution?: ConflictResolution | null;
+  resolution: ConflictResolution;
   metadata?: Record<string, unknown>;
   resolvedAt?: Date | null;
   createdAt: Date;
@@ -113,12 +108,33 @@ export interface SessionState extends ScopeRef {
   id: string;
   sessionId: string;
   workingMessages: Array<Record<string, unknown>>;
+  messageFingerprintsTail?: string[];
   lastMessageCount: number;
   lastCompactionCount: number;
   phase?: string | null;
   metadata?: Record<string, unknown>;
   createdAt: Date;
   updatedAt: Date;
+}
+
+export interface ActiveMemoryQuery {
+  slotKeys?: string[];
+  limit?: number;
+  updatedAfter?: Date;
+}
+
+export interface EpisodeQuery {
+  limit?: number;
+  createdAfter?: Date;
+}
+
+export interface ConflictQuery {
+  slotKey?: string;
+  limit?: number;
+}
+
+export interface UpsertSessionStateOptions {
+  preserveCreatedAt?: boolean;
 }
 
 export interface BuildContextInput extends ScopeRef {
@@ -139,6 +155,10 @@ export interface BuildContextResult {
   selectedRelevantEpisodeCount: number;
   avgSelectedMemoryRelevance: number;
   avgSelectedEpisodeRelevance: number;
+  candidateMemoryCount: number;
+  candidateEpisodeCount: number;
+  relevanceThresholdUsed: number;
+  pinnedMemoryCount: number;
 }
 
 export interface ProcessTurnInput extends ScopeRef {
@@ -158,10 +178,24 @@ export interface ProcessTurnResult {
   filteredOut: number;
 }
 
+export interface ResolveConflictInput extends ScopeRef {
+  conflictId: string;
+  winner: ConflictWinner;
+  mergedValue?: string;
+  metadata?: Record<string, unknown>;
+  now?: Date;
+}
+
+export interface ResolveConflictResult {
+  conflict: Conflict;
+  winnerMemory: MemoryItem;
+  affectedMemoryIds: string[];
+}
+
 export interface QueryContext {
   queryText: string;
+  normalizedQueryText: string;
   tokens: string[];
-  expandedTokens: string[];
   slotHints: Set<string>;
 }
 

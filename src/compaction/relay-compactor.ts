@@ -3,6 +3,22 @@ import type { CompactInput, CompactResult } from "../types";
 import { TokenCounter } from "../utils/token-counter";
 
 const RELAY_SUMMARY_PREFIX = "[Context Relay Summary";
+const REQUIRED_SUMMARY_HEADERS = [
+  "[Task]",
+  "[Decisions]",
+  "[Constraints]",
+  "[Open Questions]",
+  "[Key Evidence]",
+  "[Next Actions]",
+];
+
+type IndexedMessage = {
+  index: number;
+  message: any;
+  text: string;
+  priority: number;
+  protected: boolean;
+};
 
 export class RelayCompactor {
   async compact(input: CompactInput): Promise<CompactResult | null> {
@@ -18,6 +34,7 @@ export class RelayCompactor {
       compactionState,
     } = input;
 
+    const originalTokenEstimate = TokenCounter.estimateTokens(JSON.stringify(stepMessages));
     const prunedMessages = pruneMessages({
       messages: stepMessages as any[],
       reasoning: isTokenHard ? "all" : "before-last-message",
@@ -28,10 +45,13 @@ export class RelayCompactor {
     const sanitizedMessages = prunedMessages.filter((message) => !this.isRelaySummaryMessage(message));
     if (sanitizedMessages.length === 0) return null;
 
-    const cappedTargetWindow = Math.max(8, targetWindow);
-    const recentWindowSize = Math.max(6, cappedTargetWindow - 1);
-    const recentWindow = sanitizedMessages.slice(-recentWindowSize);
-    const historyMessages = sanitizedMessages.slice(0, Math.max(0, sanitizedMessages.length - recentWindow.length));
+    const protectedIndexes = this.collectProtectedIndexes(sanitizedMessages);
+    const retainedIndexes = this.selectBaseRetainedIndexes(sanitizedMessages, protectedIndexes, targetWindow);
+    const historyMessages = sanitizedMessages.filter((_, index) => !retainedIndexes.has(index));
+    const retainedEntries = sanitizedMessages
+      .map((message, index) => ({ message, index }))
+      .filter((entry) => retainedIndexes.has(entry.index));
+    const retainedMessages = retainedEntries.map((entry) => entry.message);
     const historyText = this.messagesToCompactText(historyMessages, {
       maxChars: 18_000,
       maxLines: 220,
@@ -44,7 +64,7 @@ export class RelayCompactor {
     const shouldBuildSummary = historyMessages.length > 0 || previousSummary.length > 0;
     if (shouldBuildSummary) {
       summaryText = await this.buildRelaySummaryWithLLM(model, previousSummary, historyText);
-      if (!summaryText) {
+      if (!summaryText || !this.hasRequiredSections(summaryText)) {
         summaryText = this.buildRelaySummaryFallback(sanitizedMessages, historyMessages, previousSummary);
         usedFallbackSummary = true;
       }
@@ -59,19 +79,30 @@ export class RelayCompactor {
         }
       : null;
 
-    let finalMessages: any[] = relayMessage ? [relayMessage, ...recentWindow] : [...recentWindow];
-    if (finalMessages.length > cappedTargetWindow) {
-      finalMessages = finalMessages.slice(-cappedTargetWindow);
-      if (relayMessage && !this.isRelaySummaryMessage(finalMessages[0])) {
-        finalMessages = [relayMessage, ...finalMessages.slice(-(cappedTargetWindow - 1))];
-      }
-    }
+    const retainedIndexed = retainedEntries.map(({ message, index: originalIndex }) => {
+      return {
+        index: originalIndex,
+        message,
+        text: this.messageToCompactText(message),
+        priority: this.messagePriority(message, originalIndex, sanitizedMessages.length, protectedIndexes),
+        protected: protectedIndexes.has(originalIndex),
+      } satisfies IndexedMessage;
+    });
 
+    let finalMessages: any[] = relayMessage ? [relayMessage, ...retainedMessages] : [...retainedMessages];
     const postCompactTokenCap = Math.floor(
       modelContextWindow * (isTokenEmergency ? 0.72 : isTokenHard ? 0.8 : 0.86),
     );
-    finalMessages = this.fitMessagesWithinTokenCap(finalMessages, postCompactTokenCap);
-    if (finalMessages.length === 0 || finalMessages.length >= stepMessages.length) return null;
+    finalMessages = this.fitMessagesWithinTokenCap(finalMessages, retainedIndexed, postCompactTokenCap);
+
+    const finalTokenEstimate = TokenCounter.estimateTokens(JSON.stringify(finalMessages));
+    if (
+      finalMessages.length === 0 ||
+      finalMessages.length >= stepMessages.length ||
+      finalTokenEstimate >= originalTokenEstimate
+    ) {
+      return null;
+    }
 
     return {
       finalMessages,
@@ -87,7 +118,7 @@ export class RelayCompactor {
       usedFallbackSummary,
       summaryTokens: summaryText ? TokenCounter.estimateTokens(summaryText) : 0,
       historyTokens,
-      retainedMessageCount: recentWindow.length,
+      retainedMessageCount: retainedMessages.length,
     };
   }
 
@@ -100,12 +131,7 @@ export class RelayCompactor {
           "You compress long chat history into a relay summary for an AI copilot.",
           "Preserve factual continuity only. Do not invent details.",
           "Output using EXACT section headers:",
-          "[Task]",
-          "[Decisions]",
-          "[Constraints]",
-          "[Open Questions]",
-          "[Key Evidence]",
-          "[Next Actions]",
+          ...REQUIRED_SUMMARY_HEADERS,
           "Use short bullet points under each section.",
         ].join(" "),
         prompt: [
@@ -122,6 +148,10 @@ export class RelayCompactor {
     } catch {
       return "";
     }
+  }
+
+  private hasRequiredSections(summaryText: string): boolean {
+    return REQUIRED_SUMMARY_HEADERS.every((header) => summaryText.includes(header));
   }
 
   private buildRelaySummaryFallback(
@@ -168,17 +198,108 @@ export class RelayCompactor {
     return lines.join("\n");
   }
 
+  private collectProtectedIndexes(messages: any[]): Set<number> {
+    const indexes = new Set<number>();
+    const latestUserIndex = this.findLatestIndex(messages, (message) => message?.role === "user");
+    if (latestUserIndex >= 0) indexes.add(latestUserIndex);
+
+    const lastToolIndex = this.findLatestIndex(messages, (message) => this.isToolRelatedMessage(message));
+    if (lastToolIndex >= 0) {
+      indexes.add(lastToolIndex);
+      if (lastToolIndex > 0) indexes.add(lastToolIndex - 1);
+    }
+
+    const lastFailureIndex = this.findLatestIndex(messages, (message) =>
+      /(error|failed|failure|exception|timeout|traceback|stack trace)/i.test(this.messageToCompactText(message)),
+    );
+    if (lastFailureIndex >= 0) {
+      indexes.add(lastFailureIndex);
+      if (lastFailureIndex > 0) indexes.add(lastFailureIndex - 1);
+    }
+
+    return indexes;
+  }
+
+  private selectBaseRetainedIndexes(messages: any[], protectedIndexes: Set<number>, targetWindow: number): Set<number> {
+    const cappedTargetWindow = Math.max(8, targetWindow);
+    const retained = new Set<number>(protectedIndexes);
+    for (let index = Math.max(0, messages.length - (cappedTargetWindow - 1)); index < messages.length; index += 1) {
+      retained.add(index);
+    }
+    return retained;
+  }
+
+  private fitMessagesWithinTokenCap(messages: any[], retainedIndexed: IndexedMessage[], tokenCap: number): any[] {
+    if (messages.length <= 1 || tokenCap <= 0) return messages;
+
+    const finalMessages = [...messages];
+    const removable = [...retainedIndexed];
+    while (finalMessages.length > 1) {
+      const estimate = TokenCounter.estimateTokens(JSON.stringify(finalMessages));
+      if (estimate <= tokenCap) break;
+      const nextDrop = this.pickDropCandidate(removable);
+      if (!nextDrop) break;
+      const finalIndex = finalMessages.findIndex((message) => message === nextDrop.message);
+      if (finalIndex <= 0) {
+        removable.splice(removable.indexOf(nextDrop), 1);
+        continue;
+      }
+      finalMessages.splice(finalIndex, 1);
+      removable.splice(removable.indexOf(nextDrop), 1);
+    }
+    return finalMessages;
+  }
+
+  private pickDropCandidate(messages: IndexedMessage[]): IndexedMessage | null {
+    const candidates = messages.filter((entry) => !entry.protected);
+    if (candidates.length === 0) return null;
+    candidates.sort((left, right) => {
+      if (left.priority !== right.priority) return left.priority - right.priority;
+      return left.index - right.index;
+    });
+    return candidates[0] ?? null;
+  }
+
+  private messagePriority(message: any, index: number, total: number, protectedIndexes: Set<number>): number {
+    if (protectedIndexes.has(index)) return 100;
+    if (index >= total - 4) return 60;
+    if (this.isToolRelatedMessage(message)) return 50;
+    if (/(error|failed|failure|exception|timeout|traceback|stack trace)/i.test(this.messageToCompactText(message))) {
+      return 55;
+    }
+    return 10;
+  }
+
+  private isToolRelatedMessage(message: any): boolean {
+    if (message?.role === "tool") return true;
+    if (Array.isArray(message?.content)) {
+      return message.content.some((part: any) => typeof part?.type === "string" && part.type.startsWith("tool-"));
+    }
+    return false;
+  }
+
+  private findLatestIndex(messages: any[], predicate: (message: any) => boolean): number {
+    for (let index = messages.length - 1; index >= 0; index -= 1) {
+      if (predicate(messages[index])) return index;
+    }
+    return -1;
+  }
+
   private messagesToCompactText(messages: any[], options: { maxChars: number; maxLines: number }): string {
     const lines: string[] = [];
     for (const message of messages) {
-      const text =
-        typeof message?.content === "string"
-          ? message.content
-          : JSON.stringify(message?.content ?? "");
-      lines.push(`${message?.role ?? "unknown"}: ${String(text).slice(0, options.maxChars)}`);
+      lines.push(this.messageToCompactText(message).slice(0, options.maxChars));
       if (lines.length >= options.maxLines) break;
     }
     return lines.join("\n").slice(0, options.maxChars);
+  }
+
+  private messageToCompactText(message: any): string {
+    const text =
+      typeof message?.content === "string"
+        ? message.content
+        : JSON.stringify(message?.content ?? "");
+    return `${message?.role ?? "unknown"}: ${String(text)}`;
   }
 
   private extractLatestRoleText(messages: any[], role: string): string {
@@ -195,17 +316,6 @@ export class RelayCompactor {
       return String(message?.content ?? "");
     }
     return "";
-  }
-
-  private fitMessagesWithinTokenCap(messages: any[], tokenCap: number): any[] {
-    if (messages.length <= 1 || tokenCap <= 0) return messages;
-    const finalMessages = [...messages];
-    while (finalMessages.length > 1) {
-      const estimate = TokenCounter.estimateTokens(JSON.stringify(finalMessages));
-      if (estimate <= tokenCap) break;
-      finalMessages.splice(1, 1);
-    }
-    return finalMessages;
   }
 
   private clampTextToTokens(text: string, maxTokens: number): string {

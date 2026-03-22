@@ -1,22 +1,41 @@
 import { describe, expect, it, vi } from "vitest";
-import { createAISDKCompactionPrepareStep } from "../src/integrations/ai-sdk";
+import {
+  createAISDKCompactionPrepareStep,
+  persistSessionWorkingState,
+  rehydrateSessionMessages,
+} from "../src/integrations/ai-sdk";
+import { InMemoryStore } from "../src/stores/in-memory-store";
 
 function makeMessage(index: number) {
   return {
+    id: `msg-${index}`,
     role: index % 2 === 0 ? "user" : "assistant",
     content: `Message ${index} ${"context ".repeat(120)}`,
   };
 }
 
 describe("RelayCompactor", () => {
-  it("generates a relay summary when summarize succeeds", async () => {
+  it("generates a relay summary when summarize succeeds and includes the relay marker", async () => {
     vi.resetModules();
     vi.doMock("ai", async () => {
       const actual = await vi.importActual<any>("ai");
       return {
         ...actual,
         generateText: vi.fn(async () => ({
-          text: "[Task]\n- Continue the task\n[Decisions]\n- Use Bun\n[Constraints]\n- Keep isolation\n[Open Questions]\n- None\n[Key Evidence]\n- Tool output captured\n[Next Actions]\n- Finish the implementation",
+          text: [
+            "[Task]",
+            "- Continue the task",
+            "[Decisions]",
+            "- Use Bun",
+            "[Constraints]",
+            "- Keep isolation",
+            "[Open Questions]",
+            "- None",
+            "[Key Evidence]",
+            "- Tool output captured",
+            "[Next Actions]",
+            "- Finish the implementation",
+          ].join("\n"),
         })),
       };
     });
@@ -43,15 +62,15 @@ describe("RelayCompactor", () => {
     expect(String(result?.finalMessages[0]?.content ?? "")).toContain("[Context Relay Summary");
   });
 
-  it("falls back to deterministic summary when summarization fails", async () => {
+  it("falls back when the LLM summary does not contain required sections", async () => {
     vi.resetModules();
     vi.doMock("ai", async () => {
       const actual = await vi.importActual<any>("ai");
       return {
         ...actual,
-        generateText: vi.fn(async () => {
-          throw new Error("LLM unavailable");
-        }),
+        generateText: vi.fn(async () => ({
+          text: "This is not structured enough.",
+        })),
       };
     });
 
@@ -123,5 +142,106 @@ describe("RelayCompactor", () => {
       expect.arrayContaining(["message-count", "large-tool-result", "periodic"]),
     );
     expect(result.messages).toEqual([{ role: "assistant", content: "compacted" }]);
+  });
+});
+
+describe("AI SDK integration", () => {
+  it("does not dedupe distinct messages that only share the same text", async () => {
+    const store = new InMemoryStore();
+    const scope = {
+      tenantId: "tenant",
+      scopeId: "scope",
+      namespace: "chat",
+    };
+
+    await persistSessionWorkingState({
+      store,
+      scope,
+      sessionId: "session-1",
+      messages: [
+        { id: "m1", role: "user", content: "repeat" },
+        { id: "m2", role: "assistant", content: "ack" },
+      ],
+    });
+
+    const result = await rehydrateSessionMessages({
+      store,
+      scope,
+      sessionId: "session-1",
+      incomingMessages: [{ id: "m3", role: "user", content: "repeat" }],
+    });
+
+    expect(result.effectiveMessages).toHaveLength(3);
+    expect(result.effectiveMessages[2]?.id).toBe("m3");
+  });
+
+  it("merges append-only incremental turns but refuses non-tail duplicates", async () => {
+    const store = new InMemoryStore();
+    const scope = {
+      tenantId: "tenant",
+      scopeId: "scope",
+      namespace: "chat",
+    };
+
+    await persistSessionWorkingState({
+      store,
+      scope,
+      sessionId: "session-1",
+      messages: [
+        { id: "m1", role: "user", content: "first" },
+        { id: "m2", role: "assistant", content: "second" },
+        { id: "m3", role: "user", content: "third" },
+      ],
+    });
+
+    const merged = await rehydrateSessionMessages({
+      store,
+      scope,
+      sessionId: "session-1",
+      incomingMessages: [
+        { id: "m3", role: "user", content: "third" },
+        { id: "m4", role: "assistant", content: "fourth" },
+      ],
+    });
+    const replaced = await rehydrateSessionMessages({
+      store,
+      scope,
+      sessionId: "session-1",
+      incomingMessages: [{ id: "m1", role: "user", content: "first" }],
+    });
+
+    expect(merged.effectiveMessages.map((message) => message.id)).toEqual(["m1", "m2", "m3", "m4"]);
+    expect(replaced.effectiveMessages).toEqual([{ id: "m1", role: "user", content: "first" }]);
+  });
+
+  it("preserves createdAt across repeated session persistence", async () => {
+    const store = new InMemoryStore();
+    const scope = {
+      tenantId: "tenant",
+      scopeId: "scope",
+      namespace: "chat",
+    };
+
+    await persistSessionWorkingState({
+      store,
+      scope,
+      sessionId: "session-1",
+      messages: [{ id: "m1", role: "user", content: "first" }],
+    });
+    const createdAt = (await store.getSessionState(scope, "session-1"))!.createdAt;
+
+    await persistSessionWorkingState({
+      store,
+      scope,
+      sessionId: "session-1",
+      messages: [
+        { id: "m1", role: "user", content: "first" },
+        { id: "m2", role: "assistant", content: "second" },
+      ],
+    });
+
+    const persisted = await store.getSessionState(scope, "session-1");
+    expect(persisted?.createdAt.getTime()).toBe(createdAt.getTime());
+    expect(persisted?.messageFingerprintsTail?.length).toBeGreaterThan(0);
   });
 });

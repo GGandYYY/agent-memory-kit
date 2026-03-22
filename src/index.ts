@@ -1,4 +1,5 @@
 export type {
+  ActiveMemoryQuery,
   BuildContextInput,
   BuildContextResult,
   ClassifierResult,
@@ -7,8 +8,11 @@ export type {
   CompactState,
   Conflict,
   ConflictResolution,
+  ConflictWinner,
   ConflictStatus,
+  ConflictQuery,
   Episode,
+  EpisodeQuery,
   MemoryCandidate,
   MemoryIntent,
   MemoryItem,
@@ -19,10 +23,13 @@ export type {
   PrepareStepCompactionConfig,
   ProcessTurnInput,
   ProcessTurnResult,
+  ResolveConflictInput,
+  ResolveConflictResult,
   ScopeRef,
   SessionState,
   SlotPolicy,
   SlotCardinality,
+  UpsertSessionStateOptions,
 } from "./types";
 export type { MemoryStore, SessionStateStore } from "./stores/interfaces";
 export type { StructuredMemoryEngineOptions } from "./core/memory-engine";

@@ -13,7 +13,7 @@ export function normalizeText(value: string): string {
     .toLowerCase()
     .replace(/\s+/g, " ")
     .replace(/[，。！？、]/g, " ")
-    .replace(/[^\p{L}\p{N}\s:_-]/gu, "");
+    .replace(/[^\p{L}\p{N}\s:_.-]/gu, "");
 }
 
 export function addDays(base: Date, days: number): Date {

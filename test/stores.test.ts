@@ -55,6 +55,7 @@ function baseSessionState(id: string): SessionState {
     ...scope,
     sessionId: "session-1",
     workingMessages: [{ role: "user", content: "hello" }],
+    messageFingerprintsTail: ["id:1"],
     lastMessageCount: 1,
     lastCompactionCount: 0,
     phase: "test",
@@ -70,10 +71,34 @@ describe("stores", () => {
     await store.saveMemoryItem(baseMemoryItem("mem-1"));
     await store.upsertSessionState(baseSessionState("state-1"));
 
-    const items = await store.listMemoryItems(scope);
+    const items = await store.listActiveMemoryItems(scope);
     const session = await store.getSessionState(scope, "session-1");
     expect(items).toHaveLength(1);
     expect(session?.sessionId).toBe("session-1");
+  });
+
+  it("supports expirable queries, counts, and preserveCreatedAt", async () => {
+    const store = new InMemoryStore();
+    const item = {
+      ...baseMemoryItem("exp-1"),
+      expiresAt: new Date("2026-01-02T00:00:00Z"),
+    };
+    await store.saveMemoryItem(item);
+    await store.upsertSessionState(baseSessionState("state-1"));
+    await store.upsertSessionState(
+      {
+        ...baseSessionState("state-1"),
+        updatedAt: new Date("2026-01-05T00:00:00Z"),
+        createdAt: new Date("2026-01-05T00:00:00Z"),
+      },
+      { preserveCreatedAt: true },
+    );
+
+    const expirable = await store.listExpirableMemoryItems(scope, new Date("2026-01-03T00:00:00Z"));
+    const session = await store.getSessionState(scope, "session-1");
+    expect(expirable).toHaveLength(1);
+    expect(await store.countActiveMemoryItems(scope)).toBe(1);
+    expect(session?.createdAt.toISOString()).toBe("2026-01-01T00:00:00.000Z");
   });
 
   it("persists and hydrates file-backed state", async () => {
@@ -88,9 +113,10 @@ describe("stores", () => {
     expect(raw).toContain("\"memoryItems\"");
 
     const secondStore = new FileStore(filePath);
-    const items = await secondStore.listMemoryItems(scope);
+    const items = await secondStore.listActiveMemoryItems(scope);
     const session = await secondStore.getSessionState(scope, "session-1");
     expect(items[0]?.createdAt).toBeInstanceOf(Date);
     expect(session?.updatedAt).toBeInstanceOf(Date);
+    expect(session?.messageFingerprintsTail).toEqual(["id:1"]);
   });
 });

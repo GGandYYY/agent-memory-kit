@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { pruneMessages, type UIMessage } from "ai";
 import type {
   CompactState,
@@ -30,27 +31,42 @@ export async function rehydrateSessionMessages(input: {
 }): Promise<{ effectiveMessages: any[]; sessionState: SessionState | null }> {
   const sessionState = await input.store.getSessionState(input.scope, input.sessionId);
   const storedWorkingMessages = Array.isArray(sessionState?.workingMessages)
-    ? (sessionState?.workingMessages as any[])
+    ? (sessionState.workingMessages as any[])
     : [];
-  const likelyIncrementalTurn = input.incomingMessages.length <= (input.incrementalThreshold ?? 2);
-  if (!likelyIncrementalTurn || storedWorkingMessages.length === 0) {
+  if (storedWorkingMessages.length === 0) {
     return { effectiveMessages: input.incomingMessages, sessionState };
   }
 
-  const merged: any[] = [];
-  const seen = new Set<string>();
-  for (const message of [...storedWorkingMessages, ...input.incomingMessages]) {
-    let key = "";
-    try {
-      key = JSON.stringify({ role: message.role, content: message.content });
-    } catch {
-      key = `${message.role}:${String(message.content ?? "")}`;
-    }
-    if (seen.has(key)) continue;
-    seen.add(key);
-    merged.push(message);
+  const threshold = input.incrementalThreshold ?? 2;
+  if (input.incomingMessages.length > threshold) {
+    return { effectiveMessages: input.incomingMessages, sessionState };
   }
-  return { effectiveMessages: merged, sessionState };
+
+  const storedFingerprints = sessionState?.messageFingerprintsTail?.length
+    ? sessionState.messageFingerprintsTail
+    : storedWorkingMessages.map((message) => messageFingerprint(message));
+  const incomingFingerprints = input.incomingMessages.map((message) => messageFingerprint(message));
+  const tailWindow = new Set(storedFingerprints.slice(-Math.max(threshold + 2, 6)));
+  const storedSet = new Set(storedFingerprints);
+
+  const hasNonTailDuplicate = incomingFingerprints.some((fingerprint) => storedSet.has(fingerprint) && !tailWindow.has(fingerprint));
+  if (hasNonTailDuplicate) {
+    return { effectiveMessages: input.incomingMessages, sessionState };
+  }
+
+  const overlap = longestSuffixPrefixOverlap(storedFingerprints, incomingFingerprints);
+  if (overlap === 0 && incomingFingerprints.some((fingerprint) => storedSet.has(fingerprint))) {
+    return { effectiveMessages: input.incomingMessages, sessionState };
+  }
+  const appendOnly = overlap > 0 || incomingFingerprints.every((fingerprint) => !storedSet.has(fingerprint) || tailWindow.has(fingerprint));
+  if (!appendOnly) {
+    return { effectiveMessages: input.incomingMessages, sessionState };
+  }
+
+  return {
+    effectiveMessages: [...storedWorkingMessages, ...input.incomingMessages.slice(overlap)],
+    sessionState,
+  };
 }
 
 export async function persistSessionWorkingState(input: {
@@ -69,20 +85,26 @@ export async function persistSessionWorkingState(input: {
     emptyMessages: "remove",
   }).slice(-(input.hardMessageWindow ?? DEFAULT_CONFIG.hardMessageWindow));
 
+  const existing = await input.store.getSessionState(input.scope, input.sessionId);
   const now = new Date();
-  await input.store.upsertSessionState({
-    id: `${input.scope.tenantId}:${input.scope.scopeId}:${input.scope.namespace}:${input.sessionId}`,
-    tenantId: input.scope.tenantId,
-    scopeId: input.scope.scopeId,
-    namespace: input.scope.namespace,
-    sessionId: input.sessionId,
-    workingMessages: compactedMessages as Array<Record<string, unknown>>,
-    lastMessageCount: compactedMessages.length,
-    lastCompactionCount: input.compactionCount ?? 0,
-    phase: input.phase ?? null,
-    createdAt: now,
-    updatedAt: now,
-  });
+  await input.store.upsertSessionState(
+    {
+      id: `${input.scope.tenantId}:${input.scope.scopeId}:${input.scope.namespace}:${input.sessionId}`,
+      tenantId: input.scope.tenantId,
+      scopeId: input.scope.scopeId,
+      namespace: input.scope.namespace,
+      sessionId: input.sessionId,
+      workingMessages: compactedMessages as Array<Record<string, unknown>>,
+      messageFingerprintsTail: compactedMessages.map((message) => messageFingerprint(message)),
+      lastMessageCount: compactedMessages.length,
+      lastCompactionCount: input.compactionCount ?? 0,
+      phase: input.phase ?? null,
+      metadata: existing?.metadata ?? {},
+      createdAt: existing?.createdAt ?? now,
+      updatedAt: now,
+    },
+    { preserveCreatedAt: true },
+  );
 }
 
 export function createAISDKCompactionPrepareStep(input: {
@@ -205,4 +227,44 @@ function hasLargeToolResult(steps: any[], threshold: number): boolean {
       return false;
     }
   });
+}
+
+function longestSuffixPrefixOverlap(stored: string[], incoming: string[]): number {
+  const max = Math.min(stored.length, incoming.length);
+  for (let size = max; size > 0; size -= 1) {
+    const suffix = stored.slice(-size);
+    const prefix = incoming.slice(0, size);
+    if (suffix.every((value, index) => value === prefix[index])) {
+      return size;
+    }
+  }
+  return 0;
+}
+
+function messageFingerprint(message: any): string {
+  if (typeof message?.id === "string" && message.id.trim().length > 0) {
+    return `id:${message.id}`;
+  }
+  const stable = stableJson({
+    role: message?.role ?? null,
+    content: message?.content ?? null,
+    parts: message?.parts ?? null,
+    toolName: message?.toolName ?? null,
+    name: message?.name ?? null,
+  });
+  return createHash("sha256").update(stable).digest("hex");
+}
+
+function stableJson(value: unknown): string {
+  if (value == null || typeof value !== "object") {
+    return JSON.stringify(value);
+  }
+  if (Array.isArray(value)) {
+    return `[${value.map((entry) => stableJson(entry)).join(",")}]`;
+  }
+  const record = value as Record<string, unknown>;
+  return `{${Object.keys(record)
+    .sort()
+    .map((key) => `${JSON.stringify(key)}:${stableJson(record[key])}`)
+    .join(",")}}`;
 }

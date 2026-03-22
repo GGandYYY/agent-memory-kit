@@ -1,20 +1,23 @@
 import { describe, expect, it } from "vitest";
 import { PrismaMemoryStore } from "../src/adapters/prisma/prisma-memory-store";
-import type { ScopeRef } from "../src/types";
+import type { MemoryItem, ScopeRef } from "../src/types";
 
 type Row = Record<string, any>;
 
 function createDelegate(rows: Row[] = []) {
   return {
     async findMany(args: any) {
-      const where = args?.where ?? {};
-      return rows.filter((row) =>
-        Object.entries(where).every(([key, value]) => row[key] === value),
-      );
+      let results = rows.filter((row) => matchesWhere(row, args?.where ?? {}));
+      results = applyOrderBy(results, args?.orderBy);
+      if (typeof args?.take === "number") results = results.slice(0, args.take);
+      return results;
     },
     async findFirst(args: any) {
-      const results = await this.findMany(args);
+      const results = await this.findMany({ ...args, take: 1 });
       return results[0] ?? null;
+    },
+    async findUnique(args: any) {
+      return rows.find((row) => row.id === args?.where?.id) ?? null;
     },
     async create(args: any) {
       rows.push(args.data);
@@ -41,11 +44,40 @@ function createDelegate(rows: Row[] = []) {
       rows.push(args.create);
       return args.create;
     },
+    async count(args: any) {
+      return rows.filter((row) => matchesWhere(row, args?.where ?? {})).length;
+    },
   };
 }
 
+function matchesWhere(row: Row, where: Record<string, any>): boolean {
+  return Object.entries(where).every(([key, value]) => {
+    const actual = row[key];
+    if (value && typeof value === "object" && !Array.isArray(value)) {
+      if ("in" in value) return value.in.includes(actual);
+      if ("gt" in value) return actual > value.gt;
+      if ("lte" in value) return actual <= value.lte;
+    }
+    return actual === value;
+  });
+}
+
+function applyOrderBy(rows: Row[], orderBy: any): Row[] {
+  if (!orderBy) return rows;
+  const clauses = Array.isArray(orderBy) ? orderBy : [orderBy];
+  return [...rows].sort((left, right) => {
+    for (const clause of clauses) {
+      const [key, direction] = Object.entries(clause)[0] as [string, "asc" | "desc"];
+      const multiplier = direction === "desc" ? -1 : 1;
+      if (left[key] < right[key]) return -1 * multiplier;
+      if (left[key] > right[key]) return 1 * multiplier;
+    }
+    return 0;
+  });
+}
+
 describe("PrismaMemoryStore", () => {
-  it("maps generic delegates for memory and session state", async () => {
+  it("uses targeted queries instead of scope-wide scans in consumers", async () => {
     const memoryRows: Row[] = [];
     const sessionRows: Row[] = [];
     const scope: ScopeRef = {
@@ -69,7 +101,7 @@ describe("PrismaMemoryStore", () => {
       },
     });
 
-    await store.saveMemoryItem({
+    const item: MemoryItem = {
       id: "mem-1",
       ...scope,
       memoryType: "FACT",
@@ -91,13 +123,15 @@ describe("PrismaMemoryStore", () => {
       metadata: {},
       createdAt: new Date("2026-01-01T00:00:00Z"),
       updatedAt: new Date("2026-01-01T00:00:00Z"),
-    });
+    };
 
+    await store.saveMemoryItem(item);
     await store.upsertSessionState({
       id: "session-1",
       ...scope,
       sessionId: "session-1",
       workingMessages: [{ role: "user", content: "hello" }],
+      messageFingerprintsTail: ["id:1"],
       lastMessageCount: 1,
       lastCompactionCount: 0,
       phase: null,
@@ -106,9 +140,14 @@ describe("PrismaMemoryStore", () => {
       updatedAt: new Date("2026-01-01T00:00:00Z"),
     });
 
-    const items = await store.listMemoryItems(scope);
+    const items = await store.listActiveMemoryItems(scope, { slotKeys: ["general.fact"] });
     const session = await store.getSessionState(scope, "session-1");
+    const count = await store.countActiveMemoryItems(scope);
+    const fetchedById = await store.getMemoryItemById("mem-1");
+
     expect(items).toHaveLength(1);
+    expect(count).toBe(1);
+    expect(fetchedById?.id).toBe("mem-1");
     expect(session?.sessionId).toBe("session-1");
   });
 });
