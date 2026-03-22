@@ -257,8 +257,6 @@ test/             unit tests
 - [AI SDK Integration](./docs/ai-sdk-integration.md)
 - [Compaction](./docs/compaction.md)
 - [Preset Design](./docs/preset-design.md)
-- [中文快速开始](./docs/zh-CN/quickstart.md)
-- [中文设计说明](./docs/zh-CN/design-notes.md)
 
 ## Limitations
 
