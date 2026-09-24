@@ -274,7 +274,7 @@ test/             unit tests
 
 ## License
 
-MIT. See [LICENSE](./LICENSE).
+MIT. See [LICENSE](./LICENSE)..
 
 ## Publishing Intent
 
